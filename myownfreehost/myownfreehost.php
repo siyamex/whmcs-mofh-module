@@ -3,133 +3,197 @@ if(!defined("WHMCS")) {
     die("This file cannot be accessed directly");
 }
 
-function Myownfreehost_API(array $params, $endpoint, array $data = [], $dontLog = false) {
-    // Security improvement: Force HTTPS for all API calls
-    $prefix = 'https://';
-    $url = $prefix . filter_var($params['serverhostname'], FILTER_SANITIZE_URL) . ':' . 
-           filter_var($params['serverport'], FILTER_SANITIZE_NUMBER_INT) . $endpoint;
-
-    // Validate URL
-    if (!filter_var($url, FILTER_VALIDATE_URL)) {
-        throw new Exception("Invalid API URL");
-    }
+function Myownfreehost_API(array $params, array $data = []) {
+    $url = 'https://panel.myownfreehost.net/xml-api/';
+    
+    // Add API credentials from module settings
+    $data['api_user'] = $params['serverusername'];
+    $data['api_key'] = $params['serverpassword'];
+    $data['api_v'] = '1';  // API version
 
     $curl = curl_init();
     curl_setopt_array($curl, [
         CURLOPT_URL => $url,
         CURLOPT_RETURNTRANSFER => true,
         CURLOPT_FOLLOWLOCATION => true,
-        CURLOPT_TIMEOUT => 20,
-        CURLOPT_POST => !empty($data),
-        CURLOPT_POSTFIELDS => $data,
-        // Security improvement: Enable SSL verification
-        CURLOPT_SSL_VERIFYHOST => 2,
+        CURLOPT_TIMEOUT => 30,
+        CURLOPT_POST => true,
+        CURLOPT_POSTFIELDS => http_build_query($data),
         CURLOPT_SSL_VERIFYPEER => true,
-        // Add security headers
+        CURLOPT_SSL_VERIFYHOST => 2,
         CURLOPT_HTTPHEADER => [
-            "Authorization: Basic " . base64_encode(
-                filter_var($params['serverusername'], FILTER_SANITIZE_STRING) . ":" . 
-                filter_var($params['serverpassword'], FILTER_SANITIZE_STRING)
-            ),
-            "Content-Type: application/json",
-            "X-Request-Source: WHMCS"
+            'Content-Type: application/x-www-form-urlencoded'
         ]
     ]);
 
     $response = curl_exec($curl);
-    $httpCode = curl_getinfo($curl, CURLINFO_HTTP_CODE);
     
-    if ($response === false) {
+    if (curl_errno($curl)) {
         $error = curl_error($curl);
         curl_close($curl);
-        if (!$dontLog) {
-            logModuleCall("MyOwnFreeHost", "CURL ERROR", $error, "", "", []);
-        }
+        logModuleCall("MyOwnFreeHost", "API Error", $data, $error, "", ["api_key"]);
         throw new Exception("API Request Failed: " . $error);
     }
 
     curl_close($curl);
-
-    // Parse response based on content type
-    $need = 'xml-api';
-    if (strpos($url, $need) !== false) {
-        $responseData = Myownfreehost_ParseXMLResponse($response);
-    } else {
-        $responseData = json_decode($response, true);
-    }
-
-    if (!$dontLog) {
-        // Security: Mask sensitive data before logging
-        $logData = $data;
-        if (isset($logData['password'])) $logData['password'] = '******';
-        if (isset($logData['passwd'])) $logData['passwd'] = '******';
-        
-        logModuleCall(
-            "MyOwnFreeHost",
-            $endpoint,
-            $logData,
-            $responseData,
-            "",
-            ['password', 'passwd']
-        );
-    }
-
-    return $responseData;
-}
-
-// New helper function for XML parsing
-function Myownfreehost_ParseXMLResponse($response) {
-    libxml_use_internal_errors(true);
+    
+    // Parse XML response
     $xml = simplexml_load_string($response);
     if ($xml === false) {
-        $errors = libxml_get_errors();
-        libxml_clear_errors();
-        throw new Exception("Failed to parse XML response: " . $errors[0]->message);
+        throw new Exception("Failed to parse API response");
     }
-    return json_decode(json_encode($xml), true);
+    
+    $result = json_decode(json_encode($xml), true);
+    
+    // Log the API call (masking sensitive data)
+    $logData = $data;
+    unset($logData['api_key']);
+    logModuleCall("MyOwnFreeHost", "API Call", $logData, $result, "", ["api_key"]);
+    
+    return $result;
+}
+
+function Myownfreehost_MetaData() {
+    return [
+        "DisplayName" => "MyOwnFreeHost",
+        "APIVersion" => "1.0"
+    ];
+}
+
+function Myownfreehost_ConfigOptions() {
+    return [
+        "Package_Name" => [
+            "FriendlyName" => "Hosting Package",
+            "Type" => "text",
+            "Size" => 25,
+            "Description" => "Enter the hosting package name",
+        ],
+        "Domain_TLD" => [
+            "FriendlyName" => "Domain TLD",
+            "Type" => "text",
+            "Size" => 25,
+            "Description" => "Default domain TLD (e.g., example.com)",
+            "Default" => "mywebsite.com"
+        ]
+    ];
 }
 
 function Myownfreehost_CreateAccount(array $params) {
     try {
-        // Validate required parameters
-        $requiredParams = ['username', 'password', 'domain'];
-        foreach ($requiredParams as $param) {
-            if (empty($params[$param])) {
-                throw new Exception("Missing required parameter: {$param}");
-            }
-        }
+        // Required parameters
+        $domain = $params['domain'];
+        $username = strtolower(preg_replace('/[^a-zA-Z0-9]/', '', substr($params['username'], 0, 8)));
+        $password = $params['password'];
+        $email = $params['clientsdetails']['email'];
+        $package = $params['configoption1']; // Package name
 
-        // Sanitize and validate inputs
-        $postfields = [
-            "username" => filter_var($params["username"], FILTER_SANITIZE_STRING),
-            "password" => $params["password"],
-            "domain" => filter_var($params["domain"], FILTER_SANITIZE_STRING),
-            "savepkg" => 0,
-            "quota" => filter_var(Myownfreehost_GetOption($params, 'Web_Space_Quota'), FILTER_SANITIZE_NUMBER_INT),
-            "bwlimit" => filter_var(Myownfreehost_GetOption($params, 'Bandwidth_Limit'), FILTER_SANITIZE_NUMBER_INT),
-            "contactemail" => filter_var($params['clientsdetails']['email'], FILTER_VALIDATE_EMAIL),
-            "maxftp" => filter_var(Myownfreehost_GetOption($params, 'Max_FTP_Accounts'), FILTER_SANITIZE_NUMBER_INT),
-            "maxsql" => filter_var(Myownfreehost_GetOption($params, 'Max_SQL_Databases'), FILTER_SANITIZE_NUMBER_INT),
-            "maxpop" => filter_var(Myownfreehost_GetOption($params, 'Max_Email_Accounts'), FILTER_SANITIZE_STRING),
-            "maxsub" => filter_var(Myownfreehost_GetOption($params, 'Max_Subdomains'), FILTER_SANITIZE_NUMBER_INT),
-            "maxaddon" => filter_var(Myownfreehost_GetOption($params, 'Max_Addon_Domains'), FILTER_SANITIZE_NUMBER_INT),
-            "plan" => filter_var(Myownfreehost_GetOption($params, 'WHM_Package_Name'), FILTER_SANITIZE_STRING),
-            "api.version" => 1,
-            "reseller" => 0
+        $apiData = [
+            'username' => $username,
+            'password' => $password,
+            'domain' => $domain,
+            'email' => $email,
+            'plan' => $package,
+            'action' => 'create'
         ];
 
-        $output = Myownfreehost_API($params, "/xml-api/createacct", $postfields);
-        
-        if (!isset($output["result"]["status"]) || $output["result"]["status"] !== "1") {
-            throw new Exception($output["result"]["statusmsg"] ?? "Unknown error occurred");
+        $result = Myownfreehost_API($params, $apiData);
+
+        if (isset($result['status']) && $result['status'] == 'success') {
+            return 'success';
+        } else {
+            throw new Exception($result['message'] ?? 'Unknown error occurred');
         }
-        
-        return 'success';
-    } catch(Exception $err) {
-        Myownfreehost_Error(__FUNCTION__, $params, $err);
-        return $err->getMessage();
+    } catch(Exception $e) {
+        return $e->getMessage();
     }
 }
 
-// ... Rest of the functions would follow similar security improvements
+function Myownfreehost_SuspendAccount(array $params) {
+    try {
+        $apiData = [
+            'username' => $params['username'],
+            'action' => 'suspend',
+            'reason' => $params['suspendreason'] ?? 'Suspended via WHMCS'
+        ];
+
+        $result = Myownfreehost_API($params, $apiData);
+
+        if (isset($result['status']) && $result['status'] == 'success') {
+            return 'success';
+        } else {
+            throw new Exception($result['message'] ?? 'Unknown error occurred');
+        }
+    } catch(Exception $e) {
+        return $e->getMessage();
+    }
+}
+
+function Myownfreehost_UnsuspendAccount(array $params) {
+    try {
+        $apiData = [
+            'username' => $params['username'],
+            'action' => 'unsuspend'
+        ];
+
+        $result = Myownfreehost_API($params, $apiData);
+
+        if (isset($result['status']) && $result['status'] == 'success') {
+            return 'success';
+        } else {
+            throw new Exception($result['message'] ?? 'Unknown error occurred');
+        }
+    } catch(Exception $e) {
+        return $e->getMessage();
+    }
+}
+
+function Myownfreehost_TerminateAccount(array $params) {
+    try {
+        $apiData = [
+            'username' => $params['username'],
+            'action' => 'delete'
+        ];
+
+        $result = Myownfreehost_API($params, $apiData);
+
+        if (isset($result['status']) && $result['status'] == 'success') {
+            return 'success';
+        } else {
+            throw new Exception($result['message'] ?? 'Unknown error occurred');
+        }
+    } catch(Exception $e) {
+        return $e->getMessage();
+    }
+}
+
+function Myownfreehost_ChangePassword(array $params) {
+    try {
+        $apiData = [
+            'username' => $params['username'],
+            'password' => $params['password'],
+            'action' => 'password'
+        ];
+
+        $result = Myownfreehost_API($params, $apiData);
+
+        if (isset($result['status']) && $result['status'] == 'success') {
+            return 'success';
+        } else {
+            throw new Exception($result['message'] ?? 'Unknown error occurred');
+        }
+    } catch(Exception $e) {
+        return $e->getMessage();
+    }
+}
+
+function Myownfreehost_ClientArea($params) {
+    return [
+        "overrideDisplayTitle" => ucfirst($params["domain"]),
+        "tabOverviewReplacementTemplate" => "templates/overview.tpl",
+        'vars' => [
+            'domain' => $params['domain'],
+            'username' => $params['username'],
+        ]
+    ];
+}
 ?>

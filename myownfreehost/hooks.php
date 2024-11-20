@@ -1,82 +1,77 @@
 <?php
 use WHMCS\Database\Capsule;
-use WHMCS\Service\Service;
-use WHMCS\View\Menu\Item as MenuItem;
 
-add_hook("ClientAreaPrimarySidebar", 1, "Myownfreehost_defineSsoSidebarLinks");
+add_hook("ClientAreaPrimarySidebar", -1, "Myownfreehost_defineSsoSidebarLinks");
 
-function Myownfreehost_defineSsoSidebarLinks($sidebar)
-{
-    // Check if Service Details Actions exists
+function Myownfreehost_defineSsoSidebarLinks($sidebar) {
     if (!$sidebar->getChild("Service Details Actions")) {
         return null;
     }
 
-    // Get service context using the newer method
     $service = Menu::context("service");
-    
-    // Verify service type and module
-    if (!($service instanceof Service) || $service->product->module != "myownfreehost") {
+
+    // Ensure the service is valid and matches the MOFH module
+    if (!($service instanceof WHMCS\Service\Service) || $service->product->module != "myownfreehost") {
         return null;
     }
 
-    // Check permissions using the updated method
+    // Check SSO permission
     $ssoPermission = checkContactPermission("productsso", true);
-
-    // Get service credentials
     $username = $service->username;
-    
-    // Use the secure password decryption method
+
+    // Decrypt password
     $command = 'DecryptPassword';
-    $postData = array('password2' => $service->password);
+    $postData = ['password2' => $service->password];
     $results = localAPI($command, $postData);
-    $password = $results['password'];
+    $password = $results['password'] ?? null;
 
-    // Use prepared statements for security
-    $result = Capsule::table('tblproducts')
-        ->select('configoption10', 'configoption11')
-        ->where('id', '=', $service->product->id)
-        ->first();
-
-    if (!$result) {
+    if (!$password) {
+        logModuleCall('MyOwnFreeHost', 'SSO', $service->id, 'Password decryption failed.');
         return null;
     }
 
-    $cpanelurl = $result->configoption10;
-    $lang = $result->configoption11;
+    // Fetch cPanel URL and language settings
+    $result = Capsule::select(Capsule::raw('SELECT configoption10, configoption11 FROM tblproducts WHERE id = ?', [$service->product->id]));
+    $config = $result[0] ?? null;
+    $cpanelurl = $config->configoption10 ?? '';
+    $lang = $config->configoption11 ?? 'en';
 
-    // Create secure login form with CSRF protection
+    if (empty($cpanelurl)) {
+        logModuleCall('MyOwnFreeHost', 'SSO', $service->id, 'cPanel URL not found.');
+        return null;
+    }
+
+    // Build SSO form HTML
     $bodyhtml = '
     <form action="https://cpanel.' . htmlspecialchars($cpanelurl) . '/login.php" method="post" name="login" id="form-login">
-        ' . generate_token("form") . '
-        <input name="uname" id="mod_login_username" type="hidden" class="inputbox" value="' . htmlspecialchars($username) . '" />
-        <input type="hidden" id="mod_login_password" name="passwd" class="inputbox" value="' . htmlspecialchars($password) . '"/>
-        <input type="hidden" name="language" value="' . htmlspecialchars($lang) . '" />
-        <input class="btn btn-success btn-sm btn-block" type="submit" value="' . Lang::trans('cpanellogin') . '"/>
+        <input name="uname" type="hidden" value="' . htmlspecialchars($username) . '" />
+        <input name="passwd" type="hidden" value="' . htmlspecialchars($password) . '" />
+        <input name="language" type="hidden" value="' . htmlspecialchars($lang) . '" />
+        <input class="btn btn-success btn-sm btn-block" type="submit" value="' . Lang::trans('cpanellogin') . '" />
     </form>';
 
-    // Add menu items using the newer MenuItem approach
-    $sidebar->getChild("Service Details Actions")
-        ->addChild("Login to Webmail")
-        ->setUri("http://185.27.134.244/roundcubemail/")
-        ->setLabel(Lang::trans("cpanelwebmaillogin"))
-        ->setAttributes(["target" => "_blank"])
-        ->setDisabled($service->status != "Active")
-        ->setOrder(3);
+    // Add links to the sidebar
+    $sidebar->getChild("Service Details Actions")->addChild("Login to Webmail", [
+        "uri" => "http://185.27.134.244/roundcubemail/",
+        "label" => Lang::trans("cpanelwebmaillogin"),
+        "attributes" => ["target" => "_blank"],
+        "disabled" => $service->status != "Active",
+        "order" => 3,
+    ]);
 
-    $sidebar->getChild("Service Details Actions")
-        ->addChild("Request Cancellation")
-        ->setUri("clientarea.php?action=cancel&id=" . $service->id)
-        ->setLabel(Lang::trans("cancellationrequested"))
-        ->setDisabled($service->status != "Active")
-        ->setOrder(4);
+    $sidebar->getChild("Service Details Actions")->addChild("Request Cancellation", [
+        "uri" => "clientarea.php?action=cancel&id=" . $service->id,
+        "label" => Lang::trans("cancellationrequested"),
+        "disabled" => $service->status != "Active",
+        "order" => 4,
+    ]);
 
-    // Add cPanel login section
-    $cpanelLogin = $sidebar->addChild('cPanel Login')
-        ->setLabel('cPanel Logins')
-        ->setIcon('fa-server')
-        ->setOrder(20)
-        ->setFooterHtml($bodyhtml);
-
-    return $sidebar;
+    $sidebar->addChild('cPanel Login', [
+        'label' => 'cPanel Logins',
+        'icon' => 'fa-server',
+        'order' => 20,
+        'footerHtml' => $bodyhtml,
+    ]);
 }
+?>
+
